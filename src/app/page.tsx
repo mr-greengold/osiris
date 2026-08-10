@@ -9,6 +9,9 @@ import MarketsPanel from '@/components/MarketsPanel';
 import ScmPanel from '@/components/ScmPanel';
 import SearchBar from '@/components/SearchBar';
 import DirectionsBar, { type RouteResult, type LiveLocation } from '@/components/DirectionsBar';
+import NavigationView from '@/components/NavigationView';
+import FlightWatchPanel, { type WatchedFlight, type FlightTelemetry, type AircraftDetail, type Airport } from '@/components/FlightWatchPanel';
+import type { NavProgress } from '@/lib/navigation';
 import ScaleBar from '@/components/ScaleBar';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import SharePanel from '@/components/SharePanel';
@@ -120,6 +123,78 @@ export default function Dashboard() {
   >(null);
   const [liveLocation, setLiveLocation] = useState<LiveLocation | null>(null);
   const [followUser, setFollowUser] = useState(false);
+  const [navSession, setNavSession] = useState<
+    { route: RouteResult; label: string; key: number } | null
+  >(null);
+  const [navProgress, setNavProgress] = useState<NavProgress | null>(null);
+  const [watchedFlights, setWatchedFlights] = useState<WatchedFlight[]>([]);
+  const [aircraftAirports, setAircraftAirports] = useState<Record<string, Airport[]>>({});
+
+  // The popup lives in raw map HTML, so it hands aircraft over through a global.
+  useEffect(() => {
+    (window as unknown as { osirisWatchFlight?: (f: WatchedFlight) => void }).osirisWatchFlight = (f) => {
+      if (!f?.icao24) return;
+      setWatchedFlights((prev) =>
+        prev.some((w) => w.icao24 === f.icao24) ? prev : [...prev, f].slice(-6));
+    };
+  }, []);
+
+  const removeWatched = useCallback((icao24: string) => {
+    setWatchedFlights((prev) => prev.filter((w) => w.icao24 !== icao24));
+    setAircraftAirports((prev) => {
+      const next = { ...prev };
+      delete next[icao24];
+      return next;
+    });
+  }, []);
+
+  const handleAircraftDetail = useCallback((icao24: string, detail: AircraftDetail | null) => {
+    const ports = [detail?.origin, detail?.destination]
+      .filter((a): a is Airport => Boolean(a && Number.isFinite(a.lat) && Number.isFinite(a.lng)));
+    setAircraftAirports((prev) => (ports.length ? { ...prev, [icao24]: ports } : prev));
+  }, []);
+
+  // Telemetry for watched aircraft, refreshed from whatever the feed last gave us.
+  const watchTelemetry = useMemo(() => {
+    const out: Record<string, FlightTelemetry> = {};
+    if (!watchedFlights.length) return out;
+    const buckets = [
+      data?.commercial_flights, data?.private_flights,
+      data?.private_jets, data?.military_flights,
+    ];
+    const wanted = new Set(watchedFlights.map((w) => w.icao24));
+    for (const bucket of buckets) {
+      for (const f of bucket || []) {
+        if (f?.icao24 && wanted.has(f.icao24)) {
+          out[f.icao24] = {
+            lat: f.lat, lng: f.lng, alt: f.alt,
+            speed_knots: f.speed_knots, heading: f.heading,
+            grounded: f.grounded, squawk: f.squawk,
+          };
+        }
+      }
+    }
+    return out;
+  }, [watchedFlights, data]);
+
+  // A navigation session owns its own position watch. The planner's watch dies
+  // with the planner when guidance takes over the panel, so guidance cannot
+  // depend on it — without this the banner sits on "waiting for a fix" forever.
+  useEffect(() => {
+    if (!navSession) return;
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return;
+    const id = navigator.geolocation.watchPosition(
+      (pos) => setLiveLocation({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy,
+        heading: pos.coords.heading,
+      }),
+      () => { /* the view already explains the HTTPS requirement */ },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, [navSession]);
   const [showRemote, setShowRemote] = useState(false);
   const [showArcGIS, setShowArcGIS] = useState(false);
   const [arcgisLayers, setArcgisLayers] = useState<Array<{ id: string; title: string; url: string; geojson: any; color: string; visible: boolean; opacity: number }>>([]);
@@ -858,8 +933,14 @@ export default function Dashboard() {
           arcgisLayers={arcgisLayers.filter(l => l.visible).map(l => ({ id: l.id, title: l.title, geojson: l.geojson, color: l.color, opacity: l.opacity }))}
           onMapCenter={setMapCenter}
           route={activeRoute}
-          userLocation={liveLocation}
+          userLocation={
+            navSession && navProgress
+              ? { lat: navProgress.snapped[1], lng: navProgress.snapped[0], accuracy: liveLocation?.accuracy, heading: liveLocation?.heading }
+              : liveLocation
+          }
           followUser={followUser}
+          navigating={Boolean(navSession)}
+          aircraftAirports={aircraftAirports}
         />
       </ErrorBoundary>
 
@@ -868,14 +949,53 @@ export default function Dashboard() {
         className="absolute top-3 z-[400] w-[min(92vw,372px)] pointer-events-auto"
         style={isMobile ? { left: '50%', transform: 'translateX(-50%)' } : { right: '56px' }}
       >
-        {showDirections && (
+        {navSession ? (
           <motion.div initial={{ opacity: 0, y: -12 }} animate={{ opacity: 1, y: 0 }}>
+            <NavigationView
+              key={navSession.key}
+              route={navSession.route}
+              destinationLabel={navSession.label}
+              fix={liveLocation}
+              onProgress={setNavProgress}
+              onExit={() => { setNavSession(null); setNavProgress(null); setFollowUser(false); }}
+              onReroute={async (fromPt) => {
+                // Re-plan from where the driver actually is, to the same destination.
+                const dest = navSession.route.geometry.coordinates.at(-1)!;
+                try {
+                  const res = await fetch(
+                    `/api/directions?from=${fromPt.lat},${fromPt.lng}&to=${dest[1]},${dest[0]}&mode=auto`,
+                  );
+                  const data = await res.json();
+                  if (res.ok && !data.error) {
+                    setNavSession((n) => (n ? { ...n, route: data, key: Date.now() } : n));
+                    setActiveRoute({ ...data, from: fromPt, to: { lat: dest[1], lng: dest[0] } });
+                  }
+                } catch { /* keep the old route rather than dropping guidance */ }
+              }}
+            />
+          </motion.div>
+        ) : null}
+
+        {/* The planner stays mounted underneath a running session: unmounting it
+            would discard the route you are driving, so ending guidance would
+            drop you into an empty form instead of back onto your route. */}
+        {showDirections && (
+          <motion.div
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: navSession ? 0 : 1, y: 0 }}
+            className={navSession ? 'pointer-events-none h-0 overflow-hidden' : ''}
+            aria-hidden={Boolean(navSession)}
+          >
             <DirectionsBar
               center={mapCenter ? { lat: mapCenter.lat, lng: mapCenter.lng } : null}
               onRoute={(r) => setActiveRoute(r)}
               onLiveLocation={setLiveLocation}
               onFollowChange={setFollowUser}
               onActiveSegment={(seg) => setActiveRoute((r) => (r ? { ...r, activeSegment: seg } : r))}
+              onStartNavigation={(r, label) => {
+                setNavSession({ route: r, label, key: Date.now() });
+                setFollowUser(true);
+              }}
               onLocate={(lat, lng, zoom) => setFlyToLocation({ lat, lng, zoom, ts: Date.now() })}
               onClose={() => { setShowDirections(false); setActiveRoute(null); }}
             />
@@ -883,6 +1003,24 @@ export default function Dashboard() {
         )}
       </div>
 
+
+      {/* ── FLIGHT WATCH ── */}
+      {watchedFlights.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }}
+          className="absolute top-3 z-[380] w-[min(92vw,290px)] pointer-events-auto
+                     max-h-[calc(100vh-180px)] overflow-y-auto styled-scrollbar"
+          style={{ left: isMobile ? '12px' : '120px' }}
+        >
+          <FlightWatchPanel
+            watched={watchedFlights}
+            telemetry={watchTelemetry}
+            onRemove={removeWatched}
+            onLocate={(lat, lng) => setFlyToLocation({ lat, lng, zoom: 8, ts: Date.now() })}
+            onDetail={handleAircraftDetail}
+          />
+        </motion.div>
+      )}
 
       {/* ── MAP VIEW CONTROLS ── */}
       <motion.div
@@ -1012,7 +1150,9 @@ export default function Dashboard() {
       </motion.div>
 
       {/* ── MOBILE: Compact top status ── */}
-      {isMobile && (
+      {/* The route planner claims the top of a phone screen; leaving this in
+          place would put the support badge underneath the destination field. */}
+      {isMobile && !showDirections && !navSession && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 2.5 }} className="absolute top-3 right-3 z-[200] pointer-events-auto flex items-center gap-2">
           <TokenPanel />
           <a href='https://ko-fi.com/M8D41ZYW4Z' target='_blank' rel='noopener noreferrer' className="glass-panel px-2 py-1 flex items-center gap-1.5 text-[7px] font-mono tracking-widest hover:opacity-80 transition-opacity border-[var(--gold-primary)]/40 bg-[var(--gold-primary)]/10">
@@ -1087,7 +1227,7 @@ export default function Dashboard() {
         </div>
 
         <div className="relative group">
-          <button onClick={() => { setShowDirections(!showDirections); if (showDirections) { setActiveRoute(null); setRouteSeed(null); } setShowDesktopSearch(false); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowEntityGraph(false); }} className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${showDirections ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Directions — turn-by-turn routing">
+          <button onClick={() => { setShowDirections(!showDirections); if (showDirections) { setActiveRoute(null); } setShowDesktopSearch(false); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowEntityGraph(false); }} className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${showDirections ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Directions — turn-by-turn routing">
             <Route className={`w-4 h-4 ${showDirections ? 'text-[var(--gold-primary)]' : 'text-white/60'}`} />
           </button>
           <span className="absolute right-11 top-1/2 -translate-y-1/2 px-2 py-1 text-[8px] font-mono tracking-wider text-white/80 bg-black/80 backdrop-blur-sm rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">ROUTE</span>
@@ -1265,14 +1405,45 @@ export default function Dashboard() {
                 { id: 'intel' as const, icon: Newspaper, label: 'INTEL' },
                 { id: 'recon' as const, icon: Radar, label: 'RECON' },
                 { id: 'search' as const, icon: Search, label: 'SEARCH' },
+                // Routing was reachable only from the desktop tool rail, so a
+                // phone could not open it at all. It sits next to SEARCH
+                // because both answer "take me somewhere".
+                { id: 'route' as const, icon: Route, label: 'ROUTE' },
                 { id: 'remote' as const, icon: Bluetooth, label: 'REMOTE' },
-              ].map(tab => (
-                <button key={tab.id} onClick={() => setMobilePanel(mobilePanel === tab.id ? null : tab.id)}
-                  className={`mobile-nav-btn ${mobilePanel === tab.id ? 'active' : ''}`}>
-                  <tab.icon className={`w-4 h-4 ${tab.id === 'recon' ? 'text-[var(--cyan-primary)]' : ''}`} />
-                  <span className={tab.id === 'recon' ? 'text-[var(--cyan-primary)]' : ''}>{tab.label}</span>
-                </button>
-              ))}
+              ].map(tab => {
+                // Routing opens the planner at the top of the screen rather than
+                // the bottom drawer — it needs the room above the keyboard, and
+                // guidance has to stay readable while you drive.
+                const isRoute = tab.id === 'route';
+                const active = isRoute ? showDirections || Boolean(navSession) : mobilePanel === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => {
+                      if (isRoute) {
+                        // Mid-drive this must not touch anything: closing the
+                        // planner clears the active route, which would take the
+                        // line off the map underneath a driver. Guidance is
+                        // ended from the navigation view's own exit.
+                        if (navSession) return;
+                        setMobilePanel(null);
+                        setShowDirections((open) => {
+                          if (open) setActiveRoute(null);
+                          return !open;
+                        });
+                        return;
+                      }
+                      setMobilePanel(mobilePanel === tab.id ? null : tab.id);
+                    }}
+                    aria-pressed={active}
+                    disabled={isRoute && Boolean(navSession)}
+                    className={`mobile-nav-btn ${active ? 'active' : ''}`}
+                  >
+                    <tab.icon className={`w-4 h-4 ${tab.id === 'recon' ? 'text-[var(--cyan-primary)]' : ''}`} />
+                    <span className={tab.id === 'recon' ? 'text-[var(--cyan-primary)]' : ''}>{tab.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
