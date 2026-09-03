@@ -2,7 +2,9 @@ name: Sync fork with upstream
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Every 6 hours, every day (UTC)
+    # Frequent syncing picks up upstream updates as soon as they land
+    - cron: "5 */4 * * *"
   workflow_dispatch:
 
 jobs:
@@ -11,14 +13,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout fork
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 1
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Sync upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh repo sync ${{ github.repository }} -b master
+          echo "Attempting fast-forward sync..."
+          if ! gh repo sync ${{ github.repository }} -b master; then
+            echo "Fast-forward failed (diverged fork?), performing hard reset..."
+            git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" repo
+            cd repo
+            git remote add upstream https://github.com/simplifaisoul/osiris.git
+            git fetch upstream master
+            git checkout master
+            git reset --hard upstream/master
+            git push origin master --force
+          else
+            echo "Fast-forward sync completed."
+          fi
