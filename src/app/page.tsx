@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Layers, BarChart3, Newspaper, Search, X, Globe, MapPinned, Route, Radar, Satellite, Moon, ExternalLink, AlertTriangle, Activity, Database, Wifi, Play, Network, Crosshair, Bluetooth, Pentagon, Radio , PenLine, ShoppingBag } from 'lucide-react';
+import { Layers, BarChart3, Newspaper, Search, X, Globe, MapPinned, Route, Radar, Satellite, Moon, ExternalLink, AlertTriangle, Activity, Database, Wifi, Play, Network, Crosshair, Bluetooth, Pentagon, Radio , PenLine } from 'lucide-react';
 import { type TerrainStatus } from '@/lib/map-terrain';
 import { loadCameraCatalog, mergeCameraCatalog } from '@/lib/camera-catalog';
 import IntelFeed from '@/components/IntelFeed';
@@ -40,6 +40,7 @@ import { selectInPolygon } from '@/lib/aoi';
 import { diffSweep, appendEvents, type WatchBaseline, type WatchEvent } from '@/lib/watch';
 import { STORAGE_KEY, serializeShapes, deserializeShapes, shapesToGeoJSON, downloadFile } from '@/lib/aoi-export';
 const TokenPanel = dynamic(() => import('@/components/TokenPanel'));
+import SupportMenu from '@/components/SupportMenu';
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
@@ -790,6 +791,7 @@ export default function Dashboard() {
   // ── LAYER-AWARE POLLING — only poll data for active layers ──
   useEffect(() => {
     const intervals: ReturnType<typeof setInterval>[] = [];
+    const stopFns: (() => void)[] = [];
     if (activeLayers.flights || activeLayers.military || activeLayers.jets || activeLayers.private) {
       intervals.push(setInterval(() => fetchEndpoint('/api/flights'), 300000)); // 5 min (was 2 min)
     }
@@ -801,7 +803,24 @@ export default function Dashboard() {
       intervals.push(setInterval(() => fetchEndpoint('/api/radiation', d => ({ radiation: d.stations })), 300000)); // 5m
     }
     if (activeLayers.maritime) {
-      intervals.push(setInterval(() => fetchEndpoint('/api/maritime', d => ({ maritime_ports: d.ports, maritime_chokepoints: d.chokepoints, maritime_ships: d.ships })), 10000)); // 10s
+      /* Ten seconds is the cadence a moving vessel needs. The other two thirds
+         of this payload — 52 ports and 10 chokepoints — are constants in the
+         route, and their congestion is derived from those vessels, so with no
+         AIS feed the reply is byte-identical poll after poll: 360 requests an
+         hour, per reader, for a fixed document. So the fast rate is earned by
+         actually carrying vessels, and otherwise falls back to the five
+         minutes every other layer here uses. Rescheduled rather than fixed,
+         because the count is read from a ref that no re-render announces. */
+      let vesselTimer: ReturnType<typeof setTimeout>;
+      let stopped = false;
+      const vesselGapMs = () => ((dataRef.current.maritime_ships?.length ?? 0) > 0 ? 10_000 : 300_000);
+      const pollMaritime = () => {
+        if (stopped) return;
+        fetchEndpoint('/api/maritime', d => ({ maritime_ports: d.ports, maritime_chokepoints: d.chokepoints, maritime_ships: d.ships }));
+        vesselTimer = setTimeout(pollMaritime, vesselGapMs());
+      };
+      vesselTimer = setTimeout(pollMaritime, vesselGapMs());
+      stopFns.push(() => { stopped = true; clearTimeout(vesselTimer); });
     }
     if ((activeLayers as any).cyber_attacks) {
       intervals.push(setInterval(() => {
@@ -810,7 +829,7 @@ export default function Dashboard() {
         layerFetchedRef.current.add('cyber_attacks');
       }, 300000)); // 5m — a blocklist turns over in hours, not seconds
     }
-    return () => intervals.forEach(clearInterval);
+    return () => { intervals.forEach(clearInterval); stopFns.forEach(stop => stop()); };
   }, [activeLayers, fetchEndpoint]);
 
   /* ── LIVE MALWARE — pushed over SSE while the layer is on ──
@@ -1357,15 +1376,7 @@ export default function Dashboard() {
         
         <TokenPanel />
 
-        <a href='https://ko-fi.com/M8D41ZYW4Z' target='_blank' rel='noopener noreferrer' className="pointer-events-auto glass-panel px-3 py-1.5 flex items-center gap-1.5 text-[9px] font-mono tracking-widest hover:opacity-80 transition-opacity border-[var(--gold-primary)]/40 bg-[var(--gold-primary)]/10 ml-3 shadow-[0_0_10px_rgba(255,215,0,0.1)]">
-          <div className="w-1.5 h-1.5 rounded-full bg-[var(--gold-primary)] animate-osiris-pulse" />
-          <span className="text-[var(--gold-primary)] font-bold">SUPPORT</span>
-        </a>
-
-        <a href='https://shop.osirisai.live/' target='_blank' rel='noopener noreferrer' className="pointer-events-auto glass-panel px-3 py-1.5 flex items-center gap-1.5 text-[9px] font-mono tracking-widest hover:opacity-80 transition-opacity border-[var(--cyan-primary)]/40 bg-[var(--cyan-primary)]/10 ml-3 shadow-[0_0_10px_rgba(0,229,255,0.1)]">
-          <ShoppingBag className="w-3 h-3 text-[var(--cyan-primary)]" />
-          <span className="text-[var(--cyan-primary)] font-bold">MERCH</span>
-        </a>
+        <SupportMenu />
       </motion.div>
 
       {/* ── MOBILE: Compact top status ── */}
@@ -1375,17 +1386,8 @@ export default function Dashboard() {
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 2.5 }} className="absolute top-3 right-3 z-[200] pointer-events-auto flex flex-col items-end gap-1.5">
           <div className="flex items-center gap-2">
             <TokenPanel />
-            <a href='https://ko-fi.com/M8D41ZYW4Z' target='_blank' rel='noopener noreferrer' className="glass-panel px-2 py-1 flex items-center gap-1.5 text-[9px] font-mono tracking-widest hover:opacity-80 transition-opacity border-[var(--gold-primary)]/40 bg-[var(--gold-primary)]/10">
-              <div className="w-1 h-1 rounded-full bg-[var(--gold-primary)] animate-osiris-pulse" />
-              <span className="text-[var(--gold-primary)] font-bold">SUPPORT</span>
-            </a>
+            <SupportMenu compact />
           </div>
-          {/* A third pill on this row pushes $OSIRIS under the wordmark on a
-              375px phone, so the shop link takes a line of its own. */}
-          <a href='https://shop.osirisai.live/' target='_blank' rel='noopener noreferrer' className="glass-panel px-2 py-1 flex items-center gap-1.5 text-[9px] font-mono tracking-widest hover:opacity-80 transition-opacity border-[var(--cyan-primary)]/40 bg-[var(--cyan-primary)]/10">
-            <ShoppingBag className="w-2.5 h-2.5 text-[var(--cyan-primary)]" />
-            <span className="text-[var(--cyan-primary)] font-bold">MERCH</span>
-          </a>
         </motion.div>
       )}
 
