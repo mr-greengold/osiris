@@ -177,7 +177,9 @@ async function fetchCanadaCameras(): Promise<any[]> {
     subSource('Ville MTL', 'https://ville.montreal.qc.ca/circulation/sites/ville.montreal.qc.ca.circulation/files/cameras.json', 8000),
     subSource('511 Alberta', 'https://511.alberta.ca/api/v2/get/cameras', 10000),
     subSource('City of Toronto', 'https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/a3309088-5fd4-4d34-8297-77c8301840ac/resource/4a568300-c7f8-496d-b150-dff6f5dc6d4f/download/traffic-camera-list-4326.geojson', 10000),
-    subSource('DriveBC', 'https://drivebc.ca/api/webcams', 10000),
+    /* www and the trailing slash both matter: the bare host redirects to
+       www without the slash, and that answers 404. */
+    subSource('DriveBC', 'https://www.drivebc.ca/api/webcams/', 10000),
   ]);
 
 
@@ -302,7 +304,7 @@ async function fetchCanadaCameras(): Promise<any[]> {
         cams.push({
           id: `bc-cam-${cam.id}`, lat, lng,
           name: cam.name || cam.caption || 'BC Highway Camera', city: 'British Columbia', country: 'Canada',
-          feed_url: `https://drivebc.ca${cam.links.imageDisplay}`, source: 'DriveBC',
+          feed_url: `https://www.drivebc.ca${cam.links.imageDisplay}`, source: 'DriveBC',
         });
       }
     }
@@ -564,6 +566,8 @@ const REGION_FETCHERS: Record<string, RegionFetcher> = Object.fromEntries(
  * this drops a slow region from the current response, not from the map.
  */
 const REGION_BUDGET_MS = 12_000;
+// Florida and Georgia page through thousands of records and take longer on a cold cache.
+const PAGED_REGION_BUDGET_MS = 30_000;
 
 /**
  * Regions are fetched a few at a time, not all forty-eight at once.
@@ -629,6 +633,7 @@ function refreshRegion(region: string): Promise<any[]> {
   if (existing) return existing;
 
   const started = regionPool.run(async () => {
+    const budgetMs = region === 'florida' || region === 'georgia' ? PAGED_REGION_BUDGET_MS : REGION_BUDGET_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {
@@ -638,10 +643,10 @@ function refreshRegion(region: string): Promise<any[]> {
         new Promise<any[]>(resolve => {
           timer = setTimeout(() => {
             timedOut = true;
-            console.warn(`[OSIRIS] cctv:${region} over ${REGION_BUDGET_MS}ms — backing off for 300s`);
+            console.warn(`[OSIRIS] cctv:${region} over ${budgetMs}ms — backing off for 300s`);
             backedOff.set(region, Date.now() + BACKOFF_MS);
             resolve([]);
-          }, REGION_BUDGET_MS);
+          }, budgetMs);
         }),
       ]);
     } finally {
@@ -763,6 +768,7 @@ export async function warmCctvCatalog() {
 /** Test seam — drops queued refreshes between cases. */
 export function clearCctvRefreshes() {
   refreshing.clear();
+  backedOff.clear();
   regionPool.reset();
   restoring = undefined;
   clearPayload();
@@ -793,7 +799,8 @@ async function collectRegions(regions: string[]): Promise<{ cameras: Record<stri
     .then(result => { if (result.length) cameras[region] = result; })
     .catch(() => { /* the cache logs it and keeps the last good index */ }));
 
-  const budget = Object.keys(cameras).length ? WARM_GRACE_MS : REGION_BUDGET_MS;
+  const slowSingleRegion = missing.length === 1 && (missing[0] === 'florida' || missing[0] === 'georgia');
+  const budget = Object.keys(cameras).length ? WARM_GRACE_MS : slowSingleRegion ? PAGED_REGION_BUDGET_MS : REGION_BUDGET_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, budget); });
   await Promise.race([Promise.all(fetches), deadline]);
