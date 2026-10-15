@@ -6,6 +6,7 @@ import * as maplibregl from 'maplibre-gl';
 import { installTerrainTileProtocol } from '@/lib/terrain-tiles';
 import { CLOUDS_ATTRIBUTION, CLOUDS_CREDIT, CLOUDS_LAYER, frameTime } from '@/lib/live-clouds';
 import { createCloudLayer } from '@/lib/live-clouds-layer';
+import { WIND_ATTRIBUTION } from '@/lib/wind-layer';
 import { attachOi, type OiGlobe, type OiHover } from '@/lib/oi/globe';
 import { attachHighlights, type Highlighter } from '@/lib/oi/highlights';
 import type { Highlight } from '@/lib/oi/assist/tools';
@@ -17,6 +18,9 @@ import { ALERT_KINDS, timeAgo, type AlertKind } from '@/lib/alert-digest';
 import SatelliteCard, { type SatelliteDetail } from '@/components/SatelliteCard';
 import CctvPreviews, { type PreviewCamera } from '@/components/CctvPreviews';
 import MapControls from '@/components/MapControls';
+import WindBar from '@/components/WindBar';
+import RainBar from '@/components/RainBar';
+import { DOCK } from '@/components/TimeBox';
 import LiveNewsPreviews, { type PreviewFeed } from '@/components/LiveNewsPreviews';
 import { attachTerrain, type TerrainStatus } from '@/lib/map-terrain';
 
@@ -54,6 +58,8 @@ interface OsirisMapProps {
   terrainRetry?: number;
   terrainFocus?: number;
   onTerrainStatusChange?: (status: TerrainStatus) => void;
+  /** Turns a layer off, from the power button on its box (Wind, Rain). */
+  onLayerOff?: (key: string) => void;
 
   mapStyle?: string;
   sweepData?: any;
@@ -180,7 +186,7 @@ interface AlertPinFeature {
   properties: AlertPinProps;
 }
 
-function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, onReady, flyToLocation, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {}, onOiGlobe, onOiSelect, onOiHover, onOiFollow, oiHighlight = null }: OsirisMapProps) {
+function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, onReady, flyToLocation, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, onLayerOff, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {}, onOiGlobe, onOiSelect, onOiHover, onOiFollow, oiHighlight = null }: OsirisMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
@@ -2718,6 +2724,23 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
     return () => clearInterval(refresh);
   }, [mapReady, activeLayers.live_clouds, mapStyle]);
 
+  // Rain — RainViewer's radar mosaic, keyless, its last two hours as a loop.
+  // RainBar (rendered below) adds the frames and holds their time slider.
+
+  // Wind — NOAA GFS surface wind as moving trails, through time. WindBar draws
+  // it and holds the time slider; this only credits the source while it's on.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    if (!activeLayers.wind) {
+      if (map.getLayer('wind-credit')) map.removeLayer('wind-credit');
+      if (map.getSource('wind-credit')) map.removeSource('wind-credit');
+      return;
+    }
+    if (!map.getSource('wind-credit')) map.addSource('wind-credit', { type: 'geojson', data: EMPTY_FC, attribution: WIND_ATTRIBUTION });
+    if (!map.getLayer('wind-credit')) map.addLayer({ id: 'wind-credit', type: 'circle', source: 'wind-credit' });
+  }, [mapReady, activeLayers.wind, mapStyle]);
+
   // OSIRIS OI — a prediction drawn as it happens: actors, the events of the
   // simulated worlds and arcs through the sky (see lib/oi/globe). The page feeds it
   // run state directly, so the map does not re-render on every event; the
@@ -3417,6 +3440,12 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
       )}
       {selectedSat && <SatelliteCard sat={selectedSat} onClose={clearSat} />}
       {mapReady && <MapControls mapRef={mapRef} onInteract={onFollowInterrupt} />}
+      {mapReady && (activeLayers.wind || activeLayers.rain) && (
+        <div className={DOCK}>
+          {activeLayers.wind && <WindBar mapRef={mapRef} controls={!!activeLayers.wind_controls} onOff={() => onLayerOff?.('wind')} />}
+          {activeLayers.rain && <RainBar mapRef={mapRef} mapStyle={mapStyle} controls={!!activeLayers.rain_controls} onOff={() => onLayerOff?.('rain')} />}
+        </div>
+      )}
     </>
   );
 }
