@@ -2614,19 +2614,28 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
     try {
       if (enabled) {
         // CARTO's already-loaded vector tiles include the building footprints
-        // and render heights. No second worldwide vector source is needed.
+        // and heights. No second worldwide vector source is needed. CARTO
+        // renames its source and schema between releases (carto/building with
+        // render_height, then protomaps/buildings with height), so take both
+        // names from the style's own building layer.
+        const basemapBuildings = map.getStyle().layers.find(
+          (l): l is maplibregl.FillLayerSpecification =>
+            l.type === 'fill' && /^buildings?$/.test(l['source-layer'] ?? ''),
+        );
+        const height: maplibregl.ExpressionSpecification = ['coalesce', ['get', 'height'], ['get', 'render_height'], 5];
+        const minHeight: maplibregl.ExpressionSpecification = ['coalesce', ['get', 'min_height'], ['get', 'render_min_height'], 0];
 
         // ── 3D BUILDING EXTRUSION LAYER ──
-        if (!map.getLayer('osiris-3d-buildings')) {
+        if (basemapBuildings && !map.getLayer('osiris-3d-buildings')) {
           map.addLayer({
             id: 'osiris-3d-buildings',
-            source: 'carto',
-            'source-layer': 'building',
+            source: basemapBuildings.source,
+            'source-layer': basemapBuildings['source-layer'],
             type: 'fill-extrusion',
             minzoom: 14.5,
             paint: {
               'fill-extrusion-color': [
-                'interpolate', ['linear'], ['get', 'render_height'],
+                'interpolate', ['linear'], height,
                 0, '#1a1a2e',
                 20, '#16213e',
                 50, '#0f3460',
@@ -2636,12 +2645,12 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
               'fill-extrusion-height': [
                 'interpolate', ['linear'], ['zoom'],
                 14.5, 0,
-                15.5, ['get', 'render_height']
+                15.5, height
               ],
               'fill-extrusion-base': [
                 'interpolate', ['linear'], ['zoom'],
                 14.5, 0,
-                15.5, ['get', 'render_min_height']
+                15.5, minHeight
               ],
               'fill-extrusion-opacity': [
                 'interpolate', ['linear'], ['zoom'],
