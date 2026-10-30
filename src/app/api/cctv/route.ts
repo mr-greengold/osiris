@@ -46,6 +46,7 @@ import { fetchGeorgiaCameras } from './georgia';
 import { fetchSouthCarolinaCameras } from './southcarolina';
 import { fetchNorthCarolinaCameras } from './northcarolina';
 import { fetchArizonaCameras } from './arizona';
+import { fetchIdahoCameras } from './idaho';
 import { fetchMarylandCameras } from './maryland';
 import { fetchTexasCameras } from './texas';
 import { fetchDelawareCameras } from './delaware';
@@ -483,6 +484,7 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'southcarolina': fetchSouthCarolinaCameras,
   'northcarolina': fetchNorthCarolinaCameras,
   'arizona': fetchArizonaCameras,
+  'idaho': fetchIdahoCameras,
   'maryland': fetchMarylandCameras,
   'texas': fetchTexasCameras,
   'delaware': fetchDelawareCameras,
@@ -785,6 +787,8 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 41.9 && lat < 46.3 && lng > -124.6 && lng < -116.4) regions.push('oregon');
   // Nevada (NDOT) — explicit, since us-west only covers WA + CA
   if (lat > 34.9 && lat < 42.1 && lng > -120.1 && lng < -113.9) regions.push('nevada');
+  // Idaho (ITD 511) — explicit, since us-west only covers WA + CA
+  if (lat > 41.9 && lat < 49.1 && lng > -117.3 && lng < -111.0) regions.push('idaho');
   // Texas (TxDOT), including El Paso west of the central region.
   if (lat > 25.8 && lat < 36.6 && lng > -106.7 && lng < -93.4) regions.push('texas');
   // US-Central
