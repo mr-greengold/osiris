@@ -3,6 +3,7 @@ import { stealthFetch } from '@/lib/stealthFetch';
 import { cachedSource, isStale, peekSource, seedSource } from '@/lib/sourceCache';
 import { buildPayload, clearPayload, getPayload, readSnapshot, writeSnapshot, type Payload, type RegionCameras } from '@/lib/cctv-snapshot';
 import { createPool } from '@/lib/fetch-pool';
+import { inBox, parseBox } from '@/lib/cutout';
 
 export const maxDuration = 60;
 import { fetchAsfinagCameras } from './asfinag';
@@ -55,6 +56,9 @@ import { fetchDelawareCameras } from './delaware';
 import { fetchVirginiaCameras } from './virginia';
 import { fetchBasqueCameras } from './basque';
 import { fetchEastAsiaCameras, fetchSeAsiaCameras, fetchWestAsiaCameras } from './opencctv';
+import { fetchQueenslandCameras } from './queensland';
+import { fetchCanada511Cameras } from './canada511';
+import { fetchAlaskaCameras } from './alaska';
 import {
   fetchLatamLiveCameras,
   fetchAfricaLiveCameras,
@@ -417,6 +421,9 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'us-east': fetchUSEastCameras,
   'us-central': fetchUSCentralCameras,
   'canada': fetchCanadaCameras,
+  /* Manitoba, New Brunswick, Nova Scotia, Newfoundland and Labrador, and Yukon. */
+  'canada-511': fetchCanada511Cameras,
+  'alaska': fetchAlaskaCameras,
   'europe': fetchEuropeCameras,
   'netherlands': fetchNetherlandsCameras,
   'asia': fetchAsiaCameras,
@@ -427,6 +434,9 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'turkey': fetchTurkeyCameras,
   'romania': fetchRomaniaCameras,
   'australia': fetchAustraliaCameras,
+  /* QLDTraffic's traffic and flood cameras. A region of its own, not part of
+     'australia', so its picture checks and the NSW feed each get the full budget. */
+  'queensland': fetchQueenslandCameras,
   'italy': fetchItalyCameras,
   'czechia': fetchCzechiaCameras,
   'slovakia': fetchSlovakiaCameras,
@@ -504,6 +514,10 @@ const REGION_FETCHERS: Record<string, RegionFetcher> = Object.fromEntries(
 const REGION_BUDGET_MS = 12_000;
 // Florida and Georgia page through thousands of records and take longer on a cold cache.
 const PAGED_REGION_BUDGET_MS = 30_000;
+/* The regions given PAGED_REGION_BUDGET_MS. Queensland reads the date on each
+   of its ~270 pictures to leave stopped cameras out, about 5s on its own and
+   past 12s while every region loads at once on a cold start. */
+const SLOW_REGIONS = new Set(['florida', 'georgia', 'queensland']);
 
 /**
  * Regions are fetched a few at a time, not all forty-eight at once.
@@ -569,7 +583,7 @@ function refreshRegion(region: string): Promise<any[]> {
   if (existing) return existing;
 
   const started = regionPool.run(async () => {
-    const budgetMs = region === 'florida' || region === 'georgia' ? PAGED_REGION_BUDGET_MS : REGION_BUDGET_MS;
+    const budgetMs = SLOW_REGIONS.has(region) ? PAGED_REGION_BUDGET_MS : REGION_BUDGET_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     try {
@@ -735,7 +749,7 @@ async function collectRegions(regions: string[]): Promise<{ cameras: Record<stri
     .then(result => { if (result.length) cameras[region] = result; })
     .catch(() => { /* the cache logs it and keeps the last good index */ }));
 
-  const slowSingleRegion = missing.length === 1 && (missing[0] === 'florida' || missing[0] === 'georgia');
+  const slowSingleRegion = missing.length === 1 && SLOW_REGIONS.has(missing[0]);
   const budget = Object.keys(cameras).length ? WARM_GRACE_MS : slowSingleRegion ? PAGED_REGION_BUDGET_MS : REGION_BUDGET_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, budget); });
@@ -792,7 +806,9 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   // Maryland (MDOT SHA CHART) — explicit, since us-east covers the latitudes but carries none of its cameras
   if (lat > 37.85 && lat < 39.8 && lng > -79.55 && lng < -74.95) regions.push('maryland');
   // Canada
-  if (lat > 42 && lat < 70 && lng > -141 && lng < -52) regions.push('canada');
+  if (lat > 42 && lat < 70 && lng > -141 && lng < -52) regions.push('canada', 'canada-511');
+  // Alaska (DOT&PF 511)
+  if (lat > 51 && lat < 71.6 && lng > -170 && lng < -129.9) regions.push('alaska');
   if (lat > 53.3 && lat < 53.8 && lng > -114.0 && lng < -113.2) regions.push('edmonton');
   // Europe
   const inBulgaria = lat > 41 && lat < 44.5 && lng > 22 && lng < 29.5;
@@ -865,8 +881,9 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 18 && lat < 46 && lng > 73.5 && lng < 146) regions.push('eastasia');
   if (lat > -11 && lat < 24 && lng > 92 && lng < 130) regions.push('seasia');
   if (lat > 5 && lat < 56 && lng > 25 && lng < 92) regions.push('westasia');
-  // Australia explicitly
-  if (lat > -45 && lat < -10 && lng > 110 && lng < 155) regions.push('asia');
+  // Australia explicitly: its own state feeds, and Asia's for the cameras that region carries here
+  if (lat > -45 && lat < -10 && lng > 110 && lng < 155) regions.push('australia', 'asia');
+  if (lat > -29.3 && lat < -9 && lng > 137.9 && lng < 154) regions.push('queensland');
   // New Zealand (NZTA)
   if (lat > -47.5 && lat < -34 && lng > 166 && lng < 179) regions.push('newzealand');
 
@@ -937,6 +954,31 @@ export async function GET(request: Request) {
     const lat = parseFloat(searchParams.get('lat') || '0');
     const lng = parseFloat(searchParams.get('lng') || '0');
     const radius = parseFloat(searchParams.get('radius') || '10');
+
+    /* A cut-out asks for the cameras standing in its box. They are read from
+       the whole catalogue, since a box can straddle regions, and only the
+       ones inside go back: a few dozen rows rather than the world. */
+    if (searchParams.has('bbox')) {
+      const box = parseBox(searchParams.get('bbox'));
+      if (!box) return NextResponse.json({ cameras: [], total: 0, error: 'bbox is west,south,east,north in degrees' }, { status: 400 });
+      const collected = await collectRegions(ALL_REGIONS());
+      const seen = new Set<string>();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cameras: any[] = [];
+      for (const list of Object.values(collected.cameras)) {
+        for (const cam of list) {
+          if (typeof cam?.lat !== 'number' || typeof cam?.lng !== 'number' || !inBox(cam.lng, cam.lat, box)) continue;
+          const id = String(cam.id);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          cameras.push(cam);
+        }
+      }
+      return NextResponse.json(
+        { cameras, total: cameras.length, pendingRegions: collected.pending, timestamp: new Date().toISOString() },
+        { headers: { 'Cache-Control': collected.pending.length ? 'no-store, max-age=0' : 'public, max-age=60, stale-while-revalidate=300' } },
+      );
+    }
 
     let regionsToFetch: string[];
 
