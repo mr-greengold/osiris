@@ -83,6 +83,7 @@ import { fetchWisconsinCameras } from './wisconsin';
 import { fetchOhioCameras } from './ohio';
 import { fetchNewMexicoCameras } from './new-mexico';
 import { fetchArlingtonCameras } from './arlington';
+import { fetchNewJerseyCameras } from './new-jersey';
 import { fetchScotlandCameras } from './scotland';
 import { fetchSouthAfricaCameras } from './south-africa';
 import {
@@ -501,6 +502,8 @@ const RAW_REGION_FETCHERS: Record<string, RegionFetcher> = {
   'minnesota': fetchMinnesotaCameras,
   'colorado': fetchColoradoCameras,
   'new-york': fetchNewYorkCameras,
+  /* The NJ Turnpike Authority's Turnpike and Garden State Parkway cameras. */
+  'new-jersey': fetchNewJerseyCameras,
   'nebraska': fetchNebraskaCameras,
   'kansas': fetchKansasCameras,
   /* Vermont, New Hampshire and Maine. */
@@ -667,7 +670,7 @@ function currentRegions(): RegionCameras {
   return regions;
 }
 
-/** Serialise and compress the whole-world response once, not per request. */
+/** Serialise the whole-world response once, not per request. */
 function rebuildPayload(): Payload | undefined {
   const regions = currentRegions();
   const held = Object.keys(regions);
@@ -860,6 +863,7 @@ function getRegionsForBounds(lat: number, lng: number, radius: number): string[]
   if (lat > 36.9 && lat < 40.1 && lng > -102.1 && lng < -94.5) regions.push('kansas');
   if (lat > 42.6 && lat < 47.5 && lng > -73.5 && lng < -66.8) regions.push('new-england');
   if (lat > 40.4 && lat < 45.1 && lng > -79.8 && lng < -71.8) regions.push('new-york');
+  if (lat > 38.85 && lat < 41.4 && lng > -75.6 && lng < -73.85) regions.push('new-jersey');
   if (lat > 39.7 && lat < 42.3 && lng > -80.6 && lng < -74.6) regions.push('pennsylvania');
   if (lat > 40.9 && lat < 42.1 && lng > -73.8 && lng < -71.7) regions.push('connecticut');
   if (lat > 35.9 && lat < 40.7 && lng > -95.8 && lng < -89.0) regions.push('missouri');
@@ -1003,8 +1007,12 @@ function rebuildInBackground() {
 }
 
 /**
- * The bytes are already serialised and gzipped, so a request costs a buffer
- * write. An unchanged catalogue answers a returning visitor with a 304.
+ * The bytes are already serialised, so a request costs a buffer write. An
+ * unchanged catalogue answers a returning visitor with a 304.
+ *
+ * Always plain JSON: Next.js compresses route responses itself (16.4.6) and
+ * drops a route's own Content-Encoding (16.4.5), so a pre-gzipped body reached
+ * browsers gzipped twice and the camera list failed to parse.
  */
 function servePayload(request: Request, ready: Payload) {
   const headers: Record<string, string> = {
@@ -1014,11 +1022,6 @@ function servePayload(request: Request, ready: Payload) {
     'ETag': ready.etag,
   };
   if (request.headers.get('if-none-match') === ready.etag) return new Response(null, { status: 304, headers });
-
-  if ((request.headers.get('accept-encoding') || '').includes('gzip')) {
-    headers['Content-Encoding'] = 'gzip';
-    return new Response(new Uint8Array(ready.gzip), { headers });
-  }
   return new Response(new Uint8Array(ready.json), { headers });
 }
 
